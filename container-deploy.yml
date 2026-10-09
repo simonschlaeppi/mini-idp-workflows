@@ -1,0 +1,118 @@
+name: Container build and deploy
+
+on:
+  workflow_call:
+    inputs:
+      role-to-assume:
+        type: string
+        required: true
+      ecr-repository:
+        type: string
+        required: true
+      service-name:
+        type: string
+        required: true
+      aws-region:
+        type: string
+        default: eu-central-1
+      python-version:
+        type: string
+        default: "3.12"
+      install-command:
+        type: string
+        default: pip install -r requirements.txt
+      test-command:
+        type: string
+        default: python -m pytest
+      container-port:
+        type: number
+        default: 8000
+      secret-env-name:
+        type: string
+        default: ""
+      secret-arn:
+        type: string
+        default: ""
+      deploy-enabled:
+        type: boolean
+        default: false
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ inputs.python-version }}
+          cache: pip
+      - name: Install dependencies
+        env:
+          INSTALL_COMMAND: ${{ inputs.install-command }}
+        run: bash -c "$INSTALL_COMMAND"
+      - name: Run tests
+        env:
+          TEST_COMMAND: ${{ inputs.test-command }}
+        run: bash -c "$TEST_COMMAND"
+
+  build-scan-push:
+    needs: test
+    runs-on: ubuntu-latest
+    env:
+      REPO: ${{ inputs.ecr-repository }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build image
+        run: docker build -t "$REPO:$GITHUB_SHA" .
+
+      - name: Scan image with Trivy
+        uses: aquasecurity/trivy-action@<same-SHA-as-in-your-current-workflow>  # v0.36.0
+        with:
+          image-ref: ${{ inputs.ecr-repository }}:${{ github.sha }}
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: "1"
+
+      - name: Assume AWS role via OIDC
+        if: github.ref == 'refs/heads/main'
+        id: aws
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ inputs.role-to-assume }}
+          aws-region: ${{ inputs.aws-region }}
+
+      - name: Log in to ECR
+        if: github.ref == 'refs/heads/main'
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Tag and push
+        if: github.ref == 'refs/heads/main'
+        env:
+          REGISTRY: ${{ steps.ecr.outputs.registry }}
+        run: |
+          docker tag "$REPO:$GITHUB_SHA" "$REGISTRY/$REPO:$GITHUB_SHA"
+          docker tag "$REPO:$GITHUB_SHA" "$REGISTRY/$REPO:latest"
+          docker push "$REGISTRY/$REPO:$GITHUB_SHA"
+          docker push "$REGISTRY/$REPO:latest"
+
+      - name: Deploy to ECS Express Mode
+        if: github.ref == 'refs/heads/main' && inputs.deploy-enabled
+        env:
+          IMAGE: ${{ steps.ecr.outputs.registry }}/${{ inputs.ecr-repository }}:${{ github.sha }}
+          SERVICE_ARN: arn:aws:ecs:${{ inputs.aws-region }}:${{ steps.aws.outputs.aws-account-id }}:service/default/${{ inputs.service-name }}
+          PORT: ${{ inputs.container-port }}
+          SECRET_ENV_NAME: ${{ inputs.secret-env-name }}
+          SECRET_ARN: ${{ inputs.secret-arn }}
+          AWS_REGION: ${{ inputs.aws-region }}
+        run: |
+          CONTAINER=$(jq -nc \
+            --arg image "$IMAGE" --argjson port "$PORT" \
+            --arg name "$SECRET_ENV_NAME" --arg arn "$SECRET_ARN" \
+            '{image: $image, containerPort: $port}
+             + (if $arn != "" then {secrets: [{name: $name, valueFrom: $arn}]} else {} end)')
+          aws ecs update-express-gateway-service \
+            --service-arn "$SERVICE_ARN" \
+            --primary-container "$CONTAINER" \
+            --region "$AWS_REGION"
