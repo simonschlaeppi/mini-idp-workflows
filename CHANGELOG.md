@@ -9,3 +9,6 @@
 
 ## 1.0.0
 - First release: test, build, scan, push to ECR, deploy to ECS Express Mode via OIDC
+
+## Unreleased
+- Docs: note that the deploy step is untested through the template and expected to change

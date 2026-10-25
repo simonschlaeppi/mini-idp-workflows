@@ -131,6 +131,7 @@ If a run fails with `AccessDeniedException`, the message names the missing actio
 - Assumes the ECS cluster `default`.
 - No multi-environment promotion (dev → prod) yet.
 - Not tested beyond my own setup.
+- The deploy step has not been run through the template yet. The same ECS call was proven as a standalone workflow step, and the step will change when the infrastructure moves to OpenTofu.
 
 ## Versioning
 
